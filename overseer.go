@@ -9,8 +9,6 @@ import (
 	"os"
 	"runtime"
 	"time"
-
-	"github.com/jpillora/overseer/fetcher"
 )
 
 const (
@@ -40,10 +38,6 @@ type Config struct {
 	//wait for the program to terminate itself. After this
 	//timeout, overseer will issue a SIGKILL.
 	TerminateTimeout time.Duration
-	//MinFetchInterval defines the smallest duration between Fetch()s.
-	//This helps to prevent unwieldy fetch.Interfaces from hogging
-	//too many resources. Defaults to 1 second.
-	MinFetchInterval time.Duration
 	//PreUpgrade runs after a binary has been retrieved, user defined checks
 	//can be run here and returning an error will cancel the upgrade.
 	PreUpgrade func(tempBinaryPath string) error
@@ -54,11 +48,6 @@ type Config struct {
 	//NoRestart disables all restarts, this option essentially converts
 	//the RestartSignal into a "ShutdownSignal".
 	NoRestart bool
-	//NoRestartAfterFetch disables automatic restarts after each upgrade.
-	//Though manual restarts using the RestartSignal can still be performed.
-	NoRestartAfterFetch bool
-	//Fetcher will be used to fetch binaries.
-	Fetcher fetcher.Interface
 }
 
 func validate(c *Config) error {
@@ -79,9 +68,6 @@ func validate(c *Config) error {
 	}
 	if c.TerminateTimeout <= 0 {
 		c.TerminateTimeout = 30 * time.Second
-	}
-	if c.MinFetchInterval <= 0 {
-		c.MinFetchInterval = 1 * time.Second
 	}
 	return nil
 }

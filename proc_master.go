@@ -1,7 +1,6 @@
 package overseer
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
@@ -46,20 +45,9 @@ func (mp *master) run() error {
 	if err := mp.checkBinary(); err != nil {
 		return err
 	}
-	if mp.Config.Fetcher != nil {
-		if err := mp.Config.Fetcher.Init(); err != nil {
-			mp.warnf("fetcher init failed (%s). fetcher disabled.", err)
-			mp.Config.Fetcher = nil
-		}
-	}
 	mp.setupSignalling()
 	if err := mp.retreiveFileDescriptors(); err != nil {
 		return err
-	}
-	if mp.Config.Fetcher != nil {
-		mp.printCheckUpdate = true
-		mp.fetch()
-		go mp.fetchLoop()
 	}
 	return mp.forkLoop()
 }
@@ -88,15 +76,6 @@ func (mp *master) checkBinary() error {
 	io.Copy(hash, f)
 	mp.binHash = hash.Sum(nil)
 	f.Close()
-	//test bin<->tmpbin moves
-	if mp.Config.Fetcher != nil {
-		if err := move(tmpBinPath, mp.binPath); err != nil {
-			return fmt.Errorf("cannot move binary (%s)", err)
-		}
-		if err := move(mp.binPath, tmpBinPath); err != nil {
-			return fmt.Errorf("cannot move binary back (%s)", err)
-		}
-	}
 	return nil
 }
 
@@ -174,137 +153,6 @@ func (mp *master) retreiveFileDescriptors() error {
 		mp.slaveExtraFiles[i] = f
 	}
 	return nil
-}
-
-//fetchLoop is run in a goroutine
-func (mp *master) fetchLoop() {
-	min := mp.Config.MinFetchInterval
-	time.Sleep(min)
-	for {
-		t0 := time.Now()
-		mp.fetch()
-		//duration fetch of fetch
-		diff := time.Now().Sub(t0)
-		if diff < min {
-			delay := min - diff
-			//ensures at least MinFetchInterval delay.
-			//should be throttled by the fetcher!
-			time.Sleep(delay)
-		}
-	}
-}
-
-func (mp *master) fetch() {
-	if mp.restarting {
-		return //skip if restarting
-	}
-	if mp.printCheckUpdate {
-		mp.debugf("checking for updates...")
-	}
-	reader, err := mp.Fetcher.Fetch()
-	if err != nil {
-		mp.debugf("failed to get latest version: %s", err)
-		return
-	}
-	if reader == nil {
-		if mp.printCheckUpdate {
-			mp.debugf("no updates")
-		}
-		mp.printCheckUpdate = false
-		return //fetcher has explicitly said there are no updates
-	}
-	mp.printCheckUpdate = true
-	mp.debugf("streaming update...")
-	//optional closer
-	if closer, ok := reader.(io.Closer); ok {
-		defer closer.Close()
-	}
-	tmpBin, err := os.OpenFile(tmpBinPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
-	if err != nil {
-		mp.warnf("failed to open temp binary: %s", err)
-		return
-	}
-	defer func() {
-		tmpBin.Close()
-		os.Remove(tmpBinPath)
-	}()
-	//tee off to sha1
-	hash := sha1.New()
-	reader = io.TeeReader(reader, hash)
-	//write to a temp file
-	_, err = io.Copy(tmpBin, reader)
-	if err != nil {
-		mp.warnf("failed to write temp binary: %s", err)
-		return
-	}
-	//compare hash
-	newHash := hash.Sum(nil)
-	if bytes.Equal(mp.binHash, newHash) {
-		mp.debugf("hash match - skip")
-		return
-	}
-	//copy permissions
-	if err := chmod(tmpBin, mp.binPerms); err != nil {
-		mp.warnf("failed to make temp binary executable: %s", err)
-		return
-	}
-	if err := chown(tmpBin, uid, gid); err != nil {
-		mp.warnf("failed to change owner of binary: %s", err)
-		return
-	}
-	if _, err := tmpBin.Stat(); err != nil {
-		mp.warnf("failed to stat temp binary: %s", err)
-		return
-	}
-	tmpBin.Close()
-	if _, err := os.Stat(tmpBinPath); err != nil {
-		mp.warnf("failed to stat temp binary by path: %s", err)
-		return
-	}
-	if mp.Config.PreUpgrade != nil {
-		if err := mp.Config.PreUpgrade(tmpBinPath); err != nil {
-			mp.warnf("user cancelled upgrade: %s", err)
-			return
-		}
-	}
-	//overseer sanity check, dont replace our good binary with a non-executable file
-	tokenIn := token()
-	cmd := exec.Command(tmpBinPath)
-	cmd.Env = append(os.Environ(), []string{envBinCheck + "=" + tokenIn}...)
-	cmd.Args = os.Args
-	returned := false
-	go func() {
-		time.Sleep(5 * time.Second)
-		if !returned {
-			mp.warnf("sanity check against fetched executable timed-out, check overseer is running")
-			if cmd.Process != nil {
-				cmd.Process.Kill()
-			}
-		}
-	}()
-	tokenOut, err := cmd.CombinedOutput()
-	returned = true
-	if err != nil {
-		mp.warnf("failed to run temp binary: %s (%s) output \"%s\"", err, tmpBinPath, tokenOut)
-		return
-	}
-	if tokenIn != string(tokenOut) {
-		mp.warnf("sanity check failed")
-		return
-	}
-	//overwrite!
-	if err := overwrite(mp.binPath, tmpBinPath); err != nil {
-		mp.warnf("failed to overwrite binary: %s", err)
-		return
-	}
-	mp.debugf("upgraded binary (%x -> %x)", mp.binHash[:12], newHash[:12])
-	mp.binHash = newHash
-	//binary successfully replaced
-	if !mp.Config.NoRestartAfterFetch {
-		mp.triggerRestart()
-	}
-	//and keep fetching...
-	return
 }
 
 func (mp *master) triggerRestart() {

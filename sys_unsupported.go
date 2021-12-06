@@ -1,4 +1,4 @@
-// +build !linux,!darwin,!windows,!freebsd
+// +build !linux,!darwin,!freebsd
 
 package overseer
 
